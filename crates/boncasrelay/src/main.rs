@@ -316,6 +316,12 @@ fn run(control: Arc<Control>) -> Result<()> {
             for (listener, fixed) in &*control.listeners.lock() {
                 match listener.accept() {
                     Ok((s, peer)) => {
+                        // Accepted sockets inherit the listener's non-blocking mode on
+                        // Windows, which turns the read timeouts into busy loops.
+                        if let Err(e) = s.set_nonblocking(false) {
+                            state.log(format!("Client rejected: {}: {e}", peer.ip()));
+                            continue;
+                        }
                         let c = control.config.read();
                         if workers.len() >= 128
                             || (!c.allow.is_empty()
