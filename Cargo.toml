@@ -1,0 +1,7 @@
+[workspace]
+members = ["crates/boncasrelay-core", "crates/boncasrelay"]
+resolver = "2"
+
+[workspace.dependencies]
+parking_lot = "0.12"
+pcsc = "2.9"

@@ -1,0 +1,11 @@
+[Unit]
+Description=BonCasRelay smart card sharing service
+After=pcscd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/boncasrelay --config %h/.config/boncasrelay/boncasrelay.ini
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
