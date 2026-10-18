@@ -88,7 +88,7 @@ impl ksni::Tray for LinuxTray {
         let settings = StandardItem {
             label: "設定を開く".into(),
             enabled: settings_enabled,
-            activate: Box::new(|tray| {
+            activate: Box::new(|tray: &mut Self| {
                 if let Some(url) = settings_url(&tray.control) {
                     if let Err(error) = open::that_detached(url) {
                         eprintln!("設定画面を開けません: {error}");
