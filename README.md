@@ -28,7 +28,7 @@ Rust stable、Cargo、Python 3 が必要です。PC/SC 開発環境も用意し�
 cargo build --release --features tray
 ```
 
-トレイなしの場合は `cargo build --release --no-default-features`。Linux のトレイビルドには GTK 3、Ayatana AppIndicator、X11 系開発パッケージが必要です。CI の依存一覧は `.github/workflows/ci.yml` を参照してください。
+トレイなしの場合は `cargo build --release --no-default-features`。Linux のトレイは StatusNotifierItem (D-Bus) を使い、GTK や AppIndicator の開発パッケージは不要です。Debian / Ubuntu では基本依存の `libpcsclite-dev` と `pkg-config` を用意してください。GNOME ではトレイ表示に AppIndicator / KStatusNotifierItem 拡張が必要です。トレイ機能がない環境でもサーバーは動作し、警告を記録します。
 
 ## 使い方
 

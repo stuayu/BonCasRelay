@@ -15,14 +15,19 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 getrandom = "0.2"
+open = { version = "5", optional = true }
+image = { version = "0.25", default-features = false, features = ["ico", "png"], optional = true }
+
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
 tray-icon = { version = "0.24", optional = true }
 tao = { version = "0.34", optional = true }
-open = { version = "5", optional = true }
-image = { version = "0.25", default-features = false, features = ["ico"], optional = true }
+
+[target.'cfg(not(any(target_os = "macos", windows)))'.dependencies]
+ksni = { version = "0.3.6", default-features = false, features = ["blocking"], optional = true }
 
 [features]
 default = []
-tray = ["dep:tray-icon", "dep:tao", "dep:open", "dep:image"]
+tray = ["dep:tray-icon", "dep:tao", "dep:ksni", "dep:open", "dep:image"]
 
 [dev-dependencies]
 tempfile = "3"

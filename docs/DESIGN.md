@@ -25,3 +25,9 @@
 CLI 起動は明示 `--config` 以外の INI を読みません。トレイ起動では標準パスを読み込みます。Web UI 保存先は明示設定ファイル、または OS 標準パスです。起動時に指定した CLI 上書きは保存値に混ぜず、次回起動で再び優先します。外部 Web 待受で token が空なら 256-bit token を生成し、設定ファイルへ保存します。
 
 カード通信プロトコルには認証と暗号化がありません。Web token はカード通信を保護しません。Web HTTP も平文のため、外部アクセスには VPN や SSH tunnel を利用してください。
+
+## システムトレイ
+
+macOS / Windows は `tray-icon` と `tao` を使い、Linux は GTK に依存しない `ksni` の StatusNotifierItem を使います。Linux のアイコンは PNG を RGBA として読み込み、各ピクセルを ARGB32 (A, R, G, B) に並べて D-Bus へ渡します。クライアント数を250ms周期で確認し、アイコン、ツールチップ、メニュー表示を更新します。メニューの再判定は別スレッドで実行します。バージョン情報はメニュー内にバージョン文字列として表示します。
+
+StatusNotifierWatcher がない場合は警告を出してトレイなしでサーバーを継続します。GNOME では AppIndicator / KStatusNotifierItem 拡張などの StatusNotifierItem ホストが必要です。ksni は D-Bus 接続を Rust 実装し、追加の GTK / AppIndicator 開発パッケージを必要としません。

@@ -37,8 +37,8 @@ fn settings_url(control: &crate::control::Control) -> Option<String> {
 }
 
 pub fn run(control: Arc<crate::control::Control>) -> boncasrelay_core::Result<()> {
-    let idle = load_icon(include_bytes!("../../../assets/idle.ico"))?;
-    let connected = load_icon(include_bytes!("../../../assets/connected.ico"))?;
+    let idle = load_icon(include_bytes!("../../../../assets/idle.ico"))?;
+    let connected = load_icon(include_bytes!("../../../../assets/connected.ico"))?;
     let mut event_loop = EventLoop::new();
     #[cfg(target_os = "macos")]
     {
