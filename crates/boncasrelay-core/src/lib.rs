@@ -1,4 +1,4 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 pub mod backend;
 pub mod config;
 pub mod frame;

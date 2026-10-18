@@ -9,11 +9,12 @@ use std::{
 };
 
 #[cfg(unix)]
+#[allow(unsafe_code)]
 mod dynamic_pcsc {
     use super::*;
     use libloading::Library;
     use std::{
-        ffi::{c_char, c_long, c_void},
+        ffi::{c_char, c_void},
         fs,
         path::{Path, PathBuf},
         sync::Arc,
@@ -21,6 +22,8 @@ mod dynamic_pcsc {
 
     #[cfg(target_os = "macos")]
     type Long = i32;
+    #[cfg(not(target_os = "macos"))]
+    use std::ffi::c_long;
     #[cfg(not(target_os = "macos"))]
     type Long = c_long;
     #[cfg(target_os = "macos")]
@@ -70,6 +73,8 @@ mod dynamic_pcsc {
     }
 
     impl Api {
+        // SAFETY: The caller must supply a PC/SC-compatible library whose exported symbols use
+        // the ABI declared by these function pointer types. The Library remains owned by Api.
         unsafe fn load(path: &Path) -> std::result::Result<Arc<Self>, String> {
             let library = Library::new(path).map_err(|e| e.to_string())?;
             let establish = *library
@@ -114,6 +119,7 @@ mod dynamic_pcsc {
 
         fn context(&self) -> Result<Context> {
             let mut context = 0;
+            // SAFETY: PC/SC accepts null reserved pointers and writes the context to this valid out-pointer.
             let status =
                 unsafe { (self.establish)(2, std::ptr::null(), std::ptr::null(), &mut context) };
             if status == 0 {
@@ -131,6 +137,8 @@ mod dynamic_pcsc {
     impl Backend {
         pub fn detect() -> Option<Self> {
             for path in candidates() {
+                // SAFETY: Candidate paths are loaded only as PC/SC libraries; Api retains the library
+                // for as long as any copied function pointer can be called.
                 if let Ok(api) = unsafe { Api::load(&path) } {
                     return Some(Self { api });
                 }
@@ -148,6 +156,7 @@ mod dynamic_pcsc {
             const NO_READERS: Long = 0x8010_002E_u32 as Long;
             let context = self.api.context()?;
             let mut length: Dword = 0;
+            // SAFETY: This is the documented size query: null reader buffer and valid length out-pointer.
             let status = unsafe {
                 (self.api.list_readers)(
                     context,
@@ -164,6 +173,8 @@ mod dynamic_pcsc {
                 Ok(vec![])
             } else {
                 let mut buffer = vec![0u8; length as usize];
+                // SAFETY: The allocated buffer has `length` bytes and the API receives its capacity
+                // through the initialized in/out length value.
                 let status = unsafe {
                     (self.api.list_readers)(
                         context,
@@ -189,6 +200,7 @@ mod dynamic_pcsc {
                     Ok(readers)
                 }
             };
+            // SAFETY: `context` was successfully established and is released once after enumeration.
             unsafe {
                 (self.api.release)(context);
             }
@@ -196,14 +208,16 @@ mod dynamic_pcsc {
         }
 
         fn open(&self, name: &str) -> Result<Box<dyn Card>> {
-            let context = self.api.context()?;
             let name = CString::new(name).map_err(|e| e.to_string())?;
+            let context = self.api.context()?;
             let mut card = 0;
             let mut protocol = 0;
+            // SAFETY: name is NUL-terminated; card and protocol are valid output pointers.
             let status = unsafe {
                 (self.api.connect)(context, name.as_ptr(), 2, 2, &mut card, &mut protocol)
             };
             if status != 0 {
+                // SAFETY: `context` was successfully established and has not yet been released.
                 unsafe {
                     (self.api.release)(context);
                 }
@@ -226,6 +240,7 @@ mod dynamic_pcsc {
     }
     impl Drop for DynamicCard {
         fn drop(&mut self) {
+            // SAFETY: Both handles were returned by successful PC/SC calls; Drop runs once.
             unsafe {
                 (self.api.disconnect)(self.card, 0);
                 (self.api.release)(self.context);
@@ -234,6 +249,7 @@ mod dynamic_pcsc {
     }
     impl Card for DynamicCard {
         fn session(&mut self) -> Result<Box<dyn Session + '_>> {
+            // SAFETY: `card` is a live handle owned by this DynamicCard.
             let status = unsafe { (self.api.begin)(self.card) };
             if status != 0 {
                 return Err(format!("PC/SC error: 0x{:08x}", status as u32));
@@ -252,6 +268,7 @@ mod dynamic_pcsc {
     }
     impl Drop for DynamicSession {
         fn drop(&mut self) {
+            // SAFETY: `card` has an active transaction begun before this session was created.
             unsafe {
                 (self.api.end)(self.card, 0);
             }
@@ -269,6 +286,8 @@ mod dynamic_pcsc {
             };
             let mut response = [0u8; 4096];
             let mut response_length = response.len() as Dword;
+            // SAFETY: Input pointers reference live slices/structs, output pointers reference writable
+            // stack storage, and the advertised response capacity matches the buffer size.
             let status = unsafe {
                 (self.api.transmit)(
                     self.card,
@@ -354,6 +373,7 @@ mod dynamic_pcsc {
 }
 
 #[cfg(windows)]
+#[allow(unsafe_code)]
 mod dynamic_pcsc {
     use super::*;
     use libloading::Library;
@@ -415,6 +435,8 @@ mod dynamic_pcsc {
     }
 
     impl Api {
+        // SAFETY: The caller must supply a PC/SC-compatible library whose exported symbols use
+        // the ABI declared by these function pointer types. The Library remains owned by Api.
         unsafe fn load(path: &Path) -> std::result::Result<Arc<Self>, String> {
             let library = Library::new(path).map_err(|e| e.to_string())?;
             let establish = *library
@@ -459,6 +481,7 @@ mod dynamic_pcsc {
 
         fn context(&self) -> Result<Context> {
             let mut context = 0;
+            // SAFETY: PC/SC accepts null reserved pointers and writes the context to this valid out-pointer.
             let status =
                 unsafe { (self.establish)(2, std::ptr::null(), std::ptr::null(), &mut context) };
             if status == 0 {
@@ -476,6 +499,8 @@ mod dynamic_pcsc {
     impl Backend {
         pub fn detect() -> Option<Self> {
             for path in candidates() {
+                // SAFETY: Candidate paths are loaded only as PC/SC libraries; Api retains the library
+                // for as long as any copied function pointer can be called.
                 if let Ok(api) = unsafe { Api::load(&path) } {
                     return Some(Self { api });
                 }
@@ -492,6 +517,7 @@ mod dynamic_pcsc {
             const NO_READERS: Long = 0x8010_002E_u32 as Long;
             let context = self.api.context()?;
             let mut length = 0;
+            // SAFETY: This is the documented size query: null reader buffer and valid length out-pointer.
             let status = unsafe {
                 (self.api.list_readers)(
                     context,
@@ -508,6 +534,8 @@ mod dynamic_pcsc {
                 Ok(vec![])
             } else {
                 let mut buffer = vec![0u8; length as usize];
+                // SAFETY: The allocated buffer has `length` bytes and the API receives its capacity
+                // through the initialized in/out length value.
                 let status = unsafe {
                     (self.api.list_readers)(
                         context,
@@ -531,6 +559,7 @@ mod dynamic_pcsc {
                     Ok(readers)
                 }
             };
+            // SAFETY: `context` was successfully established and is released once after enumeration.
             unsafe {
                 (self.api.release)(context);
             }
@@ -538,14 +567,16 @@ mod dynamic_pcsc {
         }
 
         fn open(&self, name: &str) -> Result<Box<dyn Card>> {
-            let context = self.api.context()?;
             let name = CString::new(name).map_err(|e| e.to_string())?;
+            let context = self.api.context()?;
             let mut card = 0;
             let mut protocol = 0;
+            // SAFETY: name is NUL-terminated; card and protocol are valid output pointers.
             let status = unsafe {
                 (self.api.connect)(context, name.as_ptr(), 2, 2, &mut card, &mut protocol)
             };
             if status != 0 {
+                // SAFETY: `context` was successfully established and has not yet been released.
                 unsafe {
                     (self.api.release)(context);
                 }
@@ -568,6 +599,7 @@ mod dynamic_pcsc {
     }
     impl Drop for DynamicCard {
         fn drop(&mut self) {
+            // SAFETY: Both handles were returned by successful PC/SC calls; Drop runs once.
             unsafe {
                 (self.api.disconnect)(self.card, 0);
                 (self.api.release)(self.context);
@@ -576,6 +608,7 @@ mod dynamic_pcsc {
     }
     impl Card for DynamicCard {
         fn session(&mut self) -> Result<Box<dyn Session + '_>> {
+            // SAFETY: `card` is a live handle owned by this DynamicCard.
             let status = unsafe { (self.api.begin)(self.card) };
             if status != 0 {
                 return Err(format!("PC/SC error: 0x{:08x}", status as u32));
@@ -594,6 +627,7 @@ mod dynamic_pcsc {
     }
     impl Drop for DynamicSession {
         fn drop(&mut self) {
+            // SAFETY: `card` has an active transaction begun before this session was created.
             unsafe {
                 (self.api.end)(self.card, 0);
             }
@@ -611,6 +645,8 @@ mod dynamic_pcsc {
             };
             let mut response = [0u8; 4096];
             let mut response_length = response.len() as Dword;
+            // SAFETY: Input pointers reference live slices/structs, output pointers reference writable
+            // stack storage, and the advertised response capacity matches the buffer size.
             let status = unsafe {
                 (self.api.transmit)(
                     self.card,
