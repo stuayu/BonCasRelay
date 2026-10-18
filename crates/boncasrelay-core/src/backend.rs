@@ -7,6 +7,656 @@ use std::{
     },
     time::Duration,
 };
+
+#[cfg(unix)]
+mod dynamic_pcsc {
+    use super::*;
+    use libloading::Library;
+    use std::{
+        ffi::{c_char, c_long, c_void},
+        fs,
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
+
+    #[cfg(target_os = "macos")]
+    type Long = i32;
+    #[cfg(not(target_os = "macos"))]
+    type Long = c_long;
+    #[cfg(target_os = "macos")]
+    type Dword = u32;
+    #[cfg(not(target_os = "macos"))]
+    type Dword = std::os::raw::c_ulong;
+    type Context = Long;
+    type Handle = Long;
+
+    type Establish =
+        unsafe extern "C" fn(Dword, *const c_void, *const c_void, *mut Context) -> Long;
+    type Release = unsafe extern "C" fn(Context) -> Long;
+    type ListReaders =
+        unsafe extern "C" fn(Context, *const c_char, *mut c_char, *mut Dword) -> Long;
+    type Connect =
+        unsafe extern "C" fn(Context, *const c_char, Dword, Dword, *mut Handle, *mut Dword) -> Long;
+    type Disconnect = unsafe extern "C" fn(Handle, Dword) -> Long;
+    type Begin = unsafe extern "C" fn(Handle) -> Long;
+    type End = unsafe extern "C" fn(Handle, Dword) -> Long;
+    type Transmit = unsafe extern "C" fn(
+        Handle,
+        *const IoRequest,
+        *const u8,
+        Dword,
+        *mut IoRequest,
+        *mut u8,
+        *mut Dword,
+    ) -> Long;
+
+    #[repr(C)]
+    struct IoRequest {
+        protocol: Dword,
+        length: Dword,
+    }
+
+    struct Api {
+        _library: Library,
+        establish: Establish,
+        release: Release,
+        list_readers: ListReaders,
+        connect: Connect,
+        disconnect: Disconnect,
+        begin: Begin,
+        end: End,
+        transmit: Transmit,
+        source: PathBuf,
+    }
+
+    impl Api {
+        unsafe fn load(path: &Path) -> std::result::Result<Arc<Self>, String> {
+            let library = Library::new(path).map_err(|e| e.to_string())?;
+            let establish = *library
+                .get::<Establish>(b"SCardEstablishContext\0")
+                .map_err(|e| e.to_string())?;
+            let release = *library
+                .get::<Release>(b"SCardReleaseContext\0")
+                .map_err(|e| e.to_string())?;
+            let list_readers = *library
+                .get::<ListReaders>(b"SCardListReaders\0")
+                .or_else(|_| library.get::<ListReaders>(b"SCardListReadersA\0"))
+                .map_err(|e| e.to_string())?;
+            let connect = *library
+                .get::<Connect>(b"SCardConnect\0")
+                .or_else(|_| library.get::<Connect>(b"SCardConnectA\0"))
+                .map_err(|e| e.to_string())?;
+            let disconnect = *library
+                .get::<Disconnect>(b"SCardDisconnect\0")
+                .map_err(|e| e.to_string())?;
+            let begin = *library
+                .get::<Begin>(b"SCardBeginTransaction\0")
+                .map_err(|e| e.to_string())?;
+            let end = *library
+                .get::<End>(b"SCardEndTransaction\0")
+                .map_err(|e| e.to_string())?;
+            let transmit = *library
+                .get::<Transmit>(b"SCardTransmit\0")
+                .map_err(|e| e.to_string())?;
+            Ok(Arc::new(Self {
+                _library: library,
+                establish,
+                release,
+                list_readers,
+                connect,
+                disconnect,
+                begin,
+                end,
+                transmit,
+                source: path.to_owned(),
+            }))
+        }
+
+        fn context(&self) -> Result<Context> {
+            let mut context = 0;
+            let status =
+                unsafe { (self.establish)(2, std::ptr::null(), std::ptr::null(), &mut context) };
+            if status == 0 {
+                Ok(context)
+            } else {
+                Err(format!("PC/SC error: 0x{:08x}", status as u32))
+            }
+        }
+    }
+
+    pub struct Backend {
+        api: Arc<Api>,
+    }
+
+    impl Backend {
+        pub fn detect() -> Option<Self> {
+            for path in candidates() {
+                if let Ok(api) = unsafe { Api::load(&path) } {
+                    return Some(Self { api });
+                }
+            }
+            None
+        }
+
+        pub fn source(&self) -> &Path {
+            &self.api.source
+        }
+    }
+
+    impl super::Backend for Backend {
+        fn readers(&self) -> Result<Vec<String>> {
+            const NO_READERS: Long = 0x8010_002E_u32 as Long;
+            let context = self.api.context()?;
+            let mut length: Dword = 0;
+            let status = unsafe {
+                (self.api.list_readers)(
+                    context,
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    &mut length,
+                )
+            };
+            let result = if status == NO_READERS {
+                Ok(vec![])
+            } else if status != 0 && status != 0x8010_0008_u32 as Long {
+                Err(format!("PC/SC error: 0x{:08x}", status as u32))
+            } else if length == 0 {
+                Ok(vec![])
+            } else {
+                let mut buffer = vec![0u8; length as usize];
+                let status = unsafe {
+                    (self.api.list_readers)(
+                        context,
+                        std::ptr::null(),
+                        buffer.as_mut_ptr().cast(),
+                        &mut length,
+                    )
+                };
+                if status != 0 {
+                    Err(format!("PC/SC error: 0x{:08x}", status as u32))
+                } else {
+                    let mut readers = Vec::new();
+                    for name in buffer
+                        .split(|b| *b == 0)
+                        .take_while(|name| !name.is_empty())
+                    {
+                        readers.push(
+                            std::str::from_utf8(name)
+                                .map_err(|_| "PC/SC reader name is not UTF-8".to_string())?
+                                .to_owned(),
+                        );
+                    }
+                    Ok(readers)
+                }
+            };
+            unsafe {
+                (self.api.release)(context);
+            }
+            result
+        }
+
+        fn open(&self, name: &str) -> Result<Box<dyn Card>> {
+            let context = self.api.context()?;
+            let name = CString::new(name).map_err(|e| e.to_string())?;
+            let mut card = 0;
+            let mut protocol = 0;
+            let status = unsafe {
+                (self.api.connect)(context, name.as_ptr(), 2, 2, &mut card, &mut protocol)
+            };
+            if status != 0 {
+                unsafe {
+                    (self.api.release)(context);
+                }
+                return Err(format!("PC/SC error: 0x{:08x}", status as u32));
+            }
+            Ok(Box::new(DynamicCard {
+                api: self.api.clone(),
+                context,
+                card,
+                protocol,
+            }))
+        }
+    }
+
+    struct DynamicCard {
+        api: Arc<Api>,
+        context: Context,
+        card: Handle,
+        protocol: Dword,
+    }
+    impl Drop for DynamicCard {
+        fn drop(&mut self) {
+            unsafe {
+                (self.api.disconnect)(self.card, 0);
+                (self.api.release)(self.context);
+            }
+        }
+    }
+    impl Card for DynamicCard {
+        fn session(&mut self) -> Result<Box<dyn Session + '_>> {
+            let status = unsafe { (self.api.begin)(self.card) };
+            if status != 0 {
+                return Err(format!("PC/SC error: 0x{:08x}", status as u32));
+            }
+            Ok(Box::new(DynamicSession {
+                api: self.api.clone(),
+                card: self.card,
+                protocol: self.protocol,
+            }))
+        }
+    }
+    struct DynamicSession {
+        api: Arc<Api>,
+        card: Handle,
+        protocol: Dword,
+    }
+    impl Drop for DynamicSession {
+        fn drop(&mut self) {
+            unsafe {
+                (self.api.end)(self.card, 0);
+            }
+        }
+    }
+    impl Session for DynamicSession {
+        fn transmit(&mut self, apdu: &[u8]) -> Result<Vec<u8>> {
+            let send_pci = IoRequest {
+                protocol: self.protocol,
+                length: std::mem::size_of::<IoRequest>() as Dword,
+            };
+            let mut receive_pci = IoRequest {
+                protocol: 0,
+                length: 0,
+            };
+            let mut response = [0u8; 4096];
+            let mut response_length = response.len() as Dword;
+            let status = unsafe {
+                (self.api.transmit)(
+                    self.card,
+                    &send_pci,
+                    apdu.as_ptr(),
+                    apdu.len() as Dword,
+                    &mut receive_pci,
+                    response.as_mut_ptr(),
+                    &mut response_length,
+                )
+            };
+            if status == 0 {
+                Ok(response[..response_length as usize].to_vec())
+            } else {
+                Err(format!("PC/SC error: 0x{:08x}", status as u32))
+            }
+        }
+    }
+
+    fn candidates() -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        if let Ok(cwd) = std::env::current_dir() {
+            if let Ok(entries) = fs::read_dir(cwd) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() && is_library_file(&path) {
+                        found.push(path);
+                    }
+                }
+            }
+        }
+        let mut dirs: Vec<PathBuf> = std::env::var_os("LD_LIBRARY_PATH")
+            .into_iter()
+            .chain(std::env::var_os("DYLD_LIBRARY_PATH"))
+            .flat_map(|v| std::env::split_paths(&v).collect::<Vec<_>>())
+            .collect();
+        dirs.extend(
+            [
+                "/usr/lib",
+                "/usr/lib64",
+                "/usr/local/lib",
+                "/opt/homebrew/lib",
+                "/opt/local/lib",
+            ]
+            .into_iter()
+            .map(PathBuf::from),
+        );
+        for dir in dirs {
+            if let Ok(entries) = fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if name.starts_with("libpcsckai.so") || name.starts_with("libpcsckai.dylib") {
+                        found.push(path);
+                    } else if path.is_dir() {
+                        if let Ok(nested) = fs::read_dir(path) {
+                            for child in nested.flatten() {
+                                let candidate = child.path();
+                                let name =
+                                    candidate.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                                if name.starts_with("libpcsckai.so")
+                                    || name.starts_with("libpcsckai.dylib")
+                                {
+                                    found.push(candidate);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        found.sort();
+        found.dedup();
+        found
+    }
+    fn is_library_file(path: &Path) -> bool {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        name.ends_with(".so")
+            || name.contains(".so.")
+            || name.ends_with(".dylib")
+            || name.ends_with(".dll")
+    }
+}
+
+#[cfg(windows)]
+mod dynamic_pcsc {
+    use super::*;
+    use libloading::Library;
+    use std::{
+        ffi::{c_char, c_void},
+        fs,
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
+
+    type Long = i32;
+    type Dword = u32;
+    type Context = usize;
+    type Handle = usize;
+
+    type Establish =
+        unsafe extern "system" fn(Dword, *const c_void, *const c_void, *mut Context) -> Long;
+    type Release = unsafe extern "system" fn(Context) -> Long;
+    type ListReaders =
+        unsafe extern "system" fn(Context, *const c_char, *mut c_char, *mut Dword) -> Long;
+    type Connect = unsafe extern "system" fn(
+        Context,
+        *const c_char,
+        Dword,
+        Dword,
+        *mut Handle,
+        *mut Dword,
+    ) -> Long;
+    type Disconnect = unsafe extern "system" fn(Handle, Dword) -> Long;
+    type Begin = unsafe extern "system" fn(Handle) -> Long;
+    type End = unsafe extern "system" fn(Handle, Dword) -> Long;
+    type Transmit = unsafe extern "system" fn(
+        Handle,
+        *const IoRequest,
+        *const u8,
+        Dword,
+        *mut IoRequest,
+        *mut u8,
+        *mut Dword,
+    ) -> Long;
+
+    #[repr(C)]
+    struct IoRequest {
+        protocol: Dword,
+        length: Dword,
+    }
+
+    struct Api {
+        _library: Library,
+        establish: Establish,
+        release: Release,
+        list_readers: ListReaders,
+        connect: Connect,
+        disconnect: Disconnect,
+        begin: Begin,
+        end: End,
+        transmit: Transmit,
+        source: PathBuf,
+    }
+
+    impl Api {
+        unsafe fn load(path: &Path) -> std::result::Result<Arc<Self>, String> {
+            let library = Library::new(path).map_err(|e| e.to_string())?;
+            let establish = *library
+                .get::<Establish>(b"SCardEstablishContext\0")
+                .map_err(|e| e.to_string())?;
+            let release = *library
+                .get::<Release>(b"SCardReleaseContext\0")
+                .map_err(|e| e.to_string())?;
+            let list_readers = *library
+                .get::<ListReaders>(b"SCardListReadersA\0")
+                .or_else(|_| library.get::<ListReaders>(b"SCardListReaders\0"))
+                .map_err(|e| e.to_string())?;
+            let connect = *library
+                .get::<Connect>(b"SCardConnectA\0")
+                .or_else(|_| library.get::<Connect>(b"SCardConnect\0"))
+                .map_err(|e| e.to_string())?;
+            let disconnect = *library
+                .get::<Disconnect>(b"SCardDisconnect\0")
+                .map_err(|e| e.to_string())?;
+            let begin = *library
+                .get::<Begin>(b"SCardBeginTransaction\0")
+                .map_err(|e| e.to_string())?;
+            let end = *library
+                .get::<End>(b"SCardEndTransaction\0")
+                .map_err(|e| e.to_string())?;
+            let transmit = *library
+                .get::<Transmit>(b"SCardTransmit\0")
+                .map_err(|e| e.to_string())?;
+            Ok(Arc::new(Self {
+                _library: library,
+                establish,
+                release,
+                list_readers,
+                connect,
+                disconnect,
+                begin,
+                end,
+                transmit,
+                source: path.to_owned(),
+            }))
+        }
+
+        fn context(&self) -> Result<Context> {
+            let mut context = 0;
+            let status =
+                unsafe { (self.establish)(2, std::ptr::null(), std::ptr::null(), &mut context) };
+            if status == 0 {
+                Ok(context)
+            } else {
+                Err(format!("PC/SC error: 0x{:08x}", status as u32))
+            }
+        }
+    }
+
+    pub struct Backend {
+        api: Arc<Api>,
+    }
+
+    impl Backend {
+        pub fn detect() -> Option<Self> {
+            for path in candidates() {
+                if let Ok(api) = unsafe { Api::load(&path) } {
+                    return Some(Self { api });
+                }
+            }
+            None
+        }
+        pub fn source(&self) -> &Path {
+            &self.api.source
+        }
+    }
+
+    impl super::Backend for Backend {
+        fn readers(&self) -> Result<Vec<String>> {
+            const NO_READERS: Long = 0x8010_002E_u32 as Long;
+            let context = self.api.context()?;
+            let mut length = 0;
+            let status = unsafe {
+                (self.api.list_readers)(
+                    context,
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    &mut length,
+                )
+            };
+            let result = if status == NO_READERS {
+                Ok(vec![])
+            } else if status != 0 && status != 0x8010_0008_u32 as Long {
+                Err(format!("PC/SC error: 0x{:08x}", status as u32))
+            } else if length == 0 {
+                Ok(vec![])
+            } else {
+                let mut buffer = vec![0u8; length as usize];
+                let status = unsafe {
+                    (self.api.list_readers)(
+                        context,
+                        std::ptr::null(),
+                        buffer.as_mut_ptr().cast(),
+                        &mut length,
+                    )
+                };
+                if status != 0 {
+                    Err(format!("PC/SC error: 0x{:08x}", status as u32))
+                } else {
+                    let mut readers = Vec::new();
+                    for name in buffer
+                        .split(|b| *b == 0)
+                        .take_while(|name| !name.is_empty())
+                    {
+                        readers.push(String::from_utf8(name.to_vec()).map_err(|_| {
+                            "PC/SC reader name is not valid Windows ANSI/UTF-8".to_string()
+                        })?);
+                    }
+                    Ok(readers)
+                }
+            };
+            unsafe {
+                (self.api.release)(context);
+            }
+            result
+        }
+
+        fn open(&self, name: &str) -> Result<Box<dyn Card>> {
+            let context = self.api.context()?;
+            let name = CString::new(name).map_err(|e| e.to_string())?;
+            let mut card = 0;
+            let mut protocol = 0;
+            let status = unsafe {
+                (self.api.connect)(context, name.as_ptr(), 2, 2, &mut card, &mut protocol)
+            };
+            if status != 0 {
+                unsafe {
+                    (self.api.release)(context);
+                }
+                return Err(format!("PC/SC error: 0x{:08x}", status as u32));
+            }
+            Ok(Box::new(DynamicCard {
+                api: self.api.clone(),
+                context,
+                card,
+                protocol,
+            }))
+        }
+    }
+
+    struct DynamicCard {
+        api: Arc<Api>,
+        context: Context,
+        card: Handle,
+        protocol: Dword,
+    }
+    impl Drop for DynamicCard {
+        fn drop(&mut self) {
+            unsafe {
+                (self.api.disconnect)(self.card, 0);
+                (self.api.release)(self.context);
+            }
+        }
+    }
+    impl Card for DynamicCard {
+        fn session(&mut self) -> Result<Box<dyn Session + '_>> {
+            let status = unsafe { (self.api.begin)(self.card) };
+            if status != 0 {
+                return Err(format!("PC/SC error: 0x{:08x}", status as u32));
+            }
+            Ok(Box::new(DynamicSession {
+                api: self.api.clone(),
+                card: self.card,
+                protocol: self.protocol,
+            }))
+        }
+    }
+    struct DynamicSession {
+        api: Arc<Api>,
+        card: Handle,
+        protocol: Dword,
+    }
+    impl Drop for DynamicSession {
+        fn drop(&mut self) {
+            unsafe {
+                (self.api.end)(self.card, 0);
+            }
+        }
+    }
+    impl Session for DynamicSession {
+        fn transmit(&mut self, apdu: &[u8]) -> Result<Vec<u8>> {
+            let send_pci = IoRequest {
+                protocol: self.protocol,
+                length: std::mem::size_of::<IoRequest>() as Dword,
+            };
+            let mut receive_pci = IoRequest {
+                protocol: 0,
+                length: 0,
+            };
+            let mut response = [0u8; 4096];
+            let mut response_length = response.len() as Dword;
+            let status = unsafe {
+                (self.api.transmit)(
+                    self.card,
+                    &send_pci,
+                    apdu.as_ptr(),
+                    apdu.len() as Dword,
+                    &mut receive_pci,
+                    response.as_mut_ptr(),
+                    &mut response_length,
+                )
+            };
+            if status == 0 {
+                Ok(response[..response_length as usize].to_vec())
+            } else {
+                Err(format!("PC/SC error: 0x{:08x}", status as u32))
+            }
+        }
+    }
+
+    fn candidates() -> Vec<PathBuf> {
+        let Ok(cwd) = std::env::current_dir() else {
+            return vec![];
+        };
+        let Ok(entries) = fs::read_dir(cwd) else {
+            return vec![];
+        };
+        let mut found: Vec<_> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|path| {
+                path.is_file()
+                    && path
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("dll"))
+            })
+            .collect();
+        found.sort_by_key(|path| {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            (
+                !name.eq_ignore_ascii_case("winscard.dll"),
+                name.to_ascii_lowercase(),
+            )
+        });
+        found
+    }
+}
 pub trait Session {
     fn transmit(&mut self, apdu: &[u8]) -> Result<Vec<u8>>;
 }
@@ -20,7 +670,23 @@ pub trait Backend: Send + Sync {
         session.transmit(apdu)
     }
 }
-pub struct NativeBackend;
+pub struct NativeBackend {
+    #[cfg(any(unix, windows))]
+    dynamic: Option<dynamic_pcsc::Backend>,
+}
+impl NativeBackend {
+    pub fn detect() -> Self {
+        Self {
+            #[cfg(any(unix, windows))]
+            dynamic: dynamic_pcsc::Backend::detect(),
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    pub fn detected_library(&self) -> Option<&std::path::Path> {
+        self.dynamic.as_ref().map(dynamic_pcsc::Backend::source)
+    }
+}
 struct NativeCard(Option<pcsc::Card>);
 impl Drop for NativeCard {
     fn drop(&mut self) {
@@ -52,6 +718,10 @@ impl Card for NativeCard {
 }
 impl Backend for NativeBackend {
     fn readers(&self) -> Result<Vec<String>> {
+        #[cfg(any(unix, windows))]
+        if let Some(dynamic) = &self.dynamic {
+            return dynamic.readers();
+        }
         let ctx = pcsc::Context::establish(pcsc::Scope::System).map_err(|e| e.to_string())?;
         let names = match ctx.list_readers_owned() {
             Ok(names) => names,
@@ -70,6 +740,10 @@ impl Backend for NativeBackend {
     }
 
     fn open(&self, name: &str) -> Result<Box<dyn Card>> {
+        #[cfg(any(unix, windows))]
+        if let Some(dynamic) = &self.dynamic {
+            return dynamic.open(name);
+        }
         let ctx = pcsc::Context::establish(pcsc::Scope::System).map_err(|e| e.to_string())?;
         let name = CString::new(name).map_err(|e| e.to_string())?;
         ctx.connect(&name, pcsc::ShareMode::Shared, pcsc::Protocols::T1)

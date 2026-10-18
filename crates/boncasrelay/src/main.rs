@@ -253,7 +253,12 @@ fn setup(c: Config) -> Result<Option<Arc<Control>>> {
     let backend: Arc<dyn Backend> = if c.mock {
         Arc::new(MockBackend::new(state.clone()))
     } else {
-        Arc::new(NativeBackend)
+        let native = NativeBackend::detect();
+        #[cfg(any(unix, windows))]
+        if let Some(path) = native.detected_library() {
+            state.log(format!("Detected PC/SC library: {}", path.display()));
+        }
+        Arc::new(native)
     };
     if c.list {
         match backend.readers() {
