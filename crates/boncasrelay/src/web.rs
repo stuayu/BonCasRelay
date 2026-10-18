@@ -1,6 +1,6 @@
 use crate::control::{Control, Settings};
 use axum::{
-    extract::{ConnectInfo, DefaultBodyLimit, State},
+    extract::{DefaultBodyLimit, State},
     http::{header, Request, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -20,83 +20,11 @@ use std::{
 struct Web {
     control: Arc<Control>,
     address: SocketAddr,
-    token: String,
 }
 fn error(status: StatusCode, message: impl ToString) -> Response {
     (status, Json(json!({"error":message.to_string()}))).into_response()
 }
-// Numeric authorities prevent DNS rebinding. On wildcard listeners accept only the
-// numeric destination IP, never a DNS name or forwarded authority.
-async fn guard(State(web): State<Web>, request: Request<axum::body::Body>, next: Next) -> Response {
-    let host = request
-        .headers()
-        .get(header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("");
-    let host_addr = host.parse::<SocketAddr>().ok();
-    let valid_host = host_addr.is_some_and(|h| {
-        h.port() == web.address.port()
-            && if web.address.ip().is_unspecified() {
-                !h.ip().is_unspecified() && !h.ip().is_multicast()
-            } else {
-                h.ip() == web.address.ip()
-            }
-    });
-    if !valid_host {
-        return error(
-            StatusCode::FORBIDDEN,
-            "Invalid Host; use a numeric IP address and port",
-        );
-    }
-    let expected_origin = format!("http://{host}");
-    if request
-        .headers()
-        .get(header::ORIGIN)
-        .is_some_and(|o| o.as_bytes() != expected_origin.as_bytes())
-        || request
-            .headers()
-            .get("sec-fetch-site")
-            .is_some_and(|v| v == "cross-site")
-    {
-        return error(StatusCode::FORBIDDEN, "Cross-origin request denied");
-    }
-    let peer = request
-        .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|p| p.0.ip());
-    let api = request.uri().path().starts_with("/api/");
-    if api {
-        if web.token.is_empty() {
-            if !web.address.ip().is_loopback() || !peer.is_some_and(|ip| ip.is_loopback()) {
-                return error(StatusCode::UNAUTHORIZED, "Loopback access required");
-            }
-        } else {
-            let expected = format!("Bearer {}", web.token);
-            let actual = request
-                .headers()
-                .get(header::AUTHORIZATION)
-                .map(|v| v.as_bytes())
-                .unwrap_or_default();
-            // Fixed-length comparison avoids early exits on a token prefix.
-            let difference = actual
-                .iter()
-                .zip(expected.as_bytes())
-                .fold(actual.len() ^ expected.len(), |d, (a, b)| {
-                    d | usize::from(a ^ b)
-                });
-            if difference != 0 {
-                return error(StatusCode::UNAUTHORIZED, "Bearer token required");
-            }
-        }
-        if request.method() != axum::http::Method::GET
-            && request
-                .headers()
-                .get("x-boncas-request")
-                .is_none_or(|v| v != "1")
-        {
-            return error(StatusCode::FORBIDDEN, "X-BonCas-Request: 1 required");
-        }
-    }
+async fn response_headers(request: Request<axum::body::Body>, next: Next) -> Response {
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
     headers.insert(
@@ -190,41 +118,15 @@ fn app(web: Web) -> Router {
         .route("/api/readers", get(readers))
         .route("/api/refresh", post(refresh))
         .layer(DefaultBodyLimit::max(32 * 1024))
-        .layer(middleware::from_fn_with_state(web.clone(), guard))
+        .layer(middleware::from_fn(response_headers))
         .with_state(web)
 }
-fn ensure_token(control: &Control) -> Result<()> {
-    let mut c = control.config.write();
-    if c.no_web || c.web_listen.ip().is_loopback() || !c.web_token.is_empty() {
-        return Ok(());
-    }
-    // Token bootstrap must not accidentally persist temporary CLI overrides.
-    let mut saved = boncasrelay_core::config::Config::default();
-    if control.path.exists() {
-        saved.load_file(&control.path)?;
-    }
-    if saved.web_token.is_empty() {
-        let mut bytes = [0; 32];
-        getrandom::getrandom(&mut bytes).map_err(|e| e.to_string())?;
-        saved.web_token = bytes.iter().map(|b| format!("{b:02x}")).collect();
-        saved.save(&control.path)?;
-        control.router.state.log(format!(
-            "Web token generated and saved to {}: {}",
-            control.path.display(),
-            saved.web_token
-        ));
-    }
-    c.web_token = saved.web_token;
-    Ok(())
-}
 pub fn start(control: Arc<Control>) -> Result<Option<thread::JoinHandle<()>>> {
-    ensure_token(&control)?;
     let c = control.config.read();
     if c.no_web {
         return Ok(None);
     }
     let address = c.web_listen;
-    let token = c.web_token.clone();
     drop(c);
     let listener = match std::net::TcpListener::bind(address) {
         Ok(l) => l,
@@ -241,6 +143,9 @@ pub fn start(control: Arc<Control>) -> Result<Option<thread::JoinHandle<()>>> {
         .router
         .state
         .log(format!("Web UI: http://{address}/"));
+    if !address.ip().is_loopback() {
+        control.router.state.log(format!("Web 設定画面は認証なしで {address} に公開されています。ファイアウォールでアクセス元を制限してください"));
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -263,7 +168,6 @@ pub fn start(control: Arc<Control>) -> Result<Option<thread::JoinHandle<()>>> {
                 let service = app(Web {
                     control: control.clone(),
                     address,
-                    token,
                 })
                 .into_make_service_with_connect_info::<SocketAddr>();
                 let server = axum::serve(listener, service).with_graceful_shutdown(async move {

@@ -1,7 +1,6 @@
 <!doctype html>
 <html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BonCasRelay 設定</title><link rel="icon" type="image/png" href="/favicon.png"><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
 <body><header><h1>BonCasRelay</h1><p>状態と設定 <span id="version"></span></p></header><main>
-<section><h2>接続認証</h2><label>Web トークン（設定済みの場合）<input id="token" type="password" autocomplete="off"></label><button id="login">接続</button><p>外部アクセスでは INI または起動ログのトークンを入力してください。トークンはこのタブ内だけに保持します。</p></section>
 <p id="message" role="status" aria-live="polite"></p>
 <section><h2>状態 <span id="connection"></span></h2><p id="listen"></p><button id="refresh">判定し直す</button><p>再判定は最短 5 秒間隔です。コマンド処理中のカードは次回に再試行します。</p><h3>接続中のクライアント</h3><div id="clients"></div><h3>リーダーと判定結果</h3><div id="readers"></div><h3>現在の振り分け先</h3><pre id="routes"></pre></section>
 <section><h2>設定</h2><p id="path"></p><p id="overrides"></p><p>保存すると実行中の設定にも反映します。接続中のクライアントは維持します。CLI 指定は次回起動時に再び優先されます。</p>

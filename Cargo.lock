@@ -157,7 +157,6 @@ dependencies = [
  "axum",
  "boncasrelay-core",
  "ctrlc",
- "getrandom 0.2.17",
  "image",
  "ksni",
  "open",

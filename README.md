@@ -71,11 +71,10 @@ INI は UTF-8。BOM、空行、`;` / `#` コメントに対応。既存 INI 移�
 | `[CardPort] PORT` | なし | 固定ポートとリーダー名。例 `6902=Reader` |
 | `[Web] Listen` | `127.0.0.1:6980` | Web UI 待受 |
 | `[Web] Enabled` | `true` | Web UI の有効・無効 |
-| `[Web] Token` | 空 | 外部待受で使う Bearer token |
 
 設定場所: Linux `$XDG_CONFIG_HOME/boncasrelay/boncasrelay.ini`（未設定時 `~/.config/boncasrelay/boncasrelay.ini`）、macOS `~/Library/Application Support/BonCasRelay/boncasrelay.ini`、Windows `%APPDATA%\BonCasRelay\boncasrelay.ini`。
 
-CLI 起動では暗黙の INI を読み込みません。`--config` 指定時はその INI を読み込みます。`--tray` は標準設定ファイルを読み込みます。CLI 指定は INI より優先されます。Web UI の保存は実行中に適用し、設定ファイルへ原子的に保存します。起動時の CLI 上書きは次回起動にも適用されます。外部 Web 待受では token が未設定なら生成して設定ファイルに保存します。
+CLI 起動では暗黙の INI を読み込みません。`--config` 指定時はその INI を読み込みます。`--tray` は標準設定ファイルを読み込みます。CLI 指定は INI より優先されます。Web UI の保存は実行中に適用し、設定ファイルへ原子的に保存します。起動時の CLI 上書きは次回起動にも適用されます。旧 INI の `[Web] Token=` は読み込み時に無視し、保存時に出力しません。
 
 ## 常駐・自動起動
 
@@ -86,7 +85,7 @@ CLI 起動では暗黙の INI を読み込みません。`--config` 指定時は
 
 ## セキュリティ
 
-BonCasLink 互換プロトコルは平文・無認証です。TCP 待受は信頼できる LAN に限定し、`Allow`、ファイアウォール、VPN を設定してください。Web UI はループバック待受が既定です。外部 IP で待ち受ける場合は token が必須です。Web token はカード通信プロトコルを保護しません。HTTP 自体も平文です。
+Web 設定画面には認証もアクセス元の検査もありません。カード通信も無認証です。ファイアウォールと `Allow` でアクセス元を管理する前提です。Web UI はループバック待受が既定です。非ループバック待受では起動時に警告を記録します。HTTP とカード通信は平文です。
 
 ## 互換性
 

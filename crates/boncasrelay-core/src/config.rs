@@ -18,7 +18,6 @@ pub struct Config {
     pub help: bool,
     pub web_listen: std::net::SocketAddr,
     pub no_web: bool,
-    pub web_token: String,
     pub tray: bool,
     pub config_path: Option<PathBuf>,
     pub cli_overrides: Vec<String>,
@@ -37,7 +36,6 @@ impl Default for Config {
             help: false,
             web_listen: "127.0.0.1:6980".parse().expect("constant socket address"),
             no_web: false,
-            web_token: String::new(),
             tray: false,
             config_path: None,
             cli_overrides: vec![],
@@ -87,7 +85,7 @@ impl Config {
                 ("Web", "Listen") => {
                     self.web_listen = value.parse().map_err(|_| "Invalid web listen address")?
                 }
-                ("Web", "Token") => self.web_token = value.into(),
+                ("Web", "Token") => {}
                 ("Web", "Enabled") => {
                     self.no_web = match value {
                         "true" | "1" => false,
@@ -250,8 +248,8 @@ impl Config {
         }
         write!(
             file,
-            "[Web]\nListen={}\nEnabled={}\nToken={}\n",
-            self.web_listen, !self.no_web, self.web_token
+            "[Web]\nListen={}\nEnabled={}\n",
+            self.web_listen, !self.no_web
         )
         .map_err(|e| e.to_string())?;
         file.as_file().sync_all().map_err(|e| e.to_string())?;
@@ -263,7 +261,6 @@ impl Config {
             .pins
             .iter()
             .chain(self.fixed.values())
-            .chain(std::iter::once(&self.web_token))
             .any(|s| s.contains(['\r', '\n']) || s.trim() != s)
         {
             return Err("INI values must be single lines without surrounding whitespace".into());

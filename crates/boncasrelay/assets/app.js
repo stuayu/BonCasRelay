@@ -2,11 +2,9 @@
 const $ = id => document.getElementById(id);
 const form = $('settings');
 let readerNames = [], initialized = false, polling = false;
-$('token').value = sessionStorage.getItem('boncas-token') || '';
 function message(text, error = false) { $('message').textContent = text; $('message').classList.toggle('error', error); }
 async function api(path, method = 'GET', data) {
-  const headers = {'X-BonCas-Request':'1'};
-  if ($('token').value) headers.Authorization = 'Bearer ' + $('token').value;
+  const headers = {};
   if (data !== undefined) headers['Content-Type'] = 'application/json';
   const response = await fetch('/api/' + path, {method, headers, body:data === undefined ? undefined : JSON.stringify(data), cache:'no-store', signal:AbortSignal.timeout(15000)});
   const result = await response.json();
@@ -67,7 +65,6 @@ async function poll() {
     }
   } catch(e) { message(e.message,true); } finally { polling=false; }
 }
-$('login').onclick=()=>{sessionStorage.setItem('boncas-token',$('token').value); initialized=false; message('接続中…'); poll();};
 $('add').onclick=()=>fixedRow('',readerNames[0]||'');
 $('refresh').onclick=async()=>{const button=$('refresh');button.disabled=true;try{await api('refresh','POST');message('再判定が完了しました。');await poll();}catch(e){message(e.message,true);}finally{button.disabled=false;}};
 form.onsubmit=async event=>{

@@ -1,5 +1,8 @@
 use super::*;
-use axum::body::{to_bytes, Body};
+use axum::{
+    body::{to_bytes, Body},
+    extract::ConnectInfo,
+};
 use boncasrelay_core::{
     backend::MockBackend, config::Config, router::Router as CardRouter, state::State as CardState,
 };
@@ -48,7 +51,6 @@ impl Fixture {
         Web {
             control: self.control.clone(),
             address: "127.0.0.1:6980".parse().unwrap(),
-            token: String::new(),
         }
     }
     fn settings(&self) -> Settings {
@@ -69,10 +71,15 @@ async fn call(
     extra: &[(&str, &str)],
     peer: &str,
 ) -> (StatusCode, Value) {
+    let host = extra
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("host"))
+        .map(|(_, value)| (*value).to_owned())
+        .unwrap_or_else(|| web.address.to_string());
     let mut request = Request::builder()
         .method(method)
         .uri(path)
-        .header(header::HOST, web.address.to_string())
+        .header(header::HOST, host)
         .header(header::CONTENT_TYPE, "application/json");
     for (name, value) in extra {
         request = request.header(*name, *value);
@@ -87,15 +94,7 @@ async fn call(
     (status, serde_json::from_slice(&bytes).unwrap())
 }
 async fn put(f: &Fixture, body: Value) -> (StatusCode, Value) {
-    call(
-        f.web(),
-        "PUT",
-        "/api/config",
-        body,
-        &[("x-boncas-request", "1")],
-        "127.0.0.1:12345",
-    )
-    .await
+    call(f.web(), "PUT", "/api/config", body, &[], "127.0.0.1:12345").await
 }
 fn assert_error(status: StatusCode, body: &Value, expected: StatusCode) {
     assert_eq!(status, expected, "{body}");
@@ -213,120 +212,50 @@ fn malformed_updates_return_json_errors_without_mutation() {
 }
 
 #[test]
-fn remote_api_requires_token_and_checks_full_bearer() {
+fn arbitrary_origin_and_host_allow_state_update_and_refresh_without_extra_headers() {
     let f = Fixture::new();
     runtime().block_on(async {
-        let mut web = f.web();
-        web.address = "192.0.2.1:6980".parse().unwrap();
+        let hostile = [
+            ("host", "untrusted.example:9999"),
+            ("origin", "https://elsewhere.example"),
+            ("sec-fetch-site", "cross-site"),
+        ];
         let (status, body) = call(
-            web.clone(),
+            f.web(),
             "GET",
             "/api/state",
             Value::Null,
-            &[],
-            "192.0.2.2:12345",
-        )
-        .await;
-        assert_error(status, &body, StatusCode::UNAUTHORIZED);
-        web.token = "secret-token".into();
-        for token in [
-            None,
-            Some("Bearer secret"),
-            Some("Bearer secret-token-extra"),
-            Some("bearer secret-token"),
-        ] {
-            let headers = token
-                .map(|v| vec![("authorization", v)])
-                .unwrap_or_default();
-            let (status, body) = call(
-                web.clone(),
-                "GET",
-                "/api/state",
-                Value::Null,
-                &headers,
-                "192.0.2.2:12345",
-            )
-            .await;
-            assert_error(status, &body, StatusCode::UNAUTHORIZED);
-        }
-        let (status, body) = call(
-            web,
-            "GET",
-            "/api/state",
-            Value::Null,
-            &[("authorization", "Bearer secret-token")],
+            &hostile,
             "192.0.2.2:12345",
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        let (status, body) = call(
-            f.web(),
-            "GET",
-            "/api/state",
-            Value::Null,
-            &[],
-            "192.0.2.2:12345",
-        )
-        .await;
-        assert_error(status, &body, StatusCode::UNAUTHORIZED);
-    });
-}
 
-#[test]
-fn csrf_host_origin_and_custom_header_are_enforced() {
-    let f = Fixture::new();
-    let body = serde_json::to_value(f.settings()).unwrap();
-    runtime().block_on(async {
-        for headers in [
-            vec![
-                ("origin", "https://evil.example"),
-                ("x-boncas-request", "1"),
-            ],
-            vec![("sec-fetch-site", "cross-site"), ("x-boncas-request", "1")],
-            vec![],
-            vec![("x-boncas-request", "0")],
-        ] {
-            let (status, response) = call(
-                f.web(),
-                "PUT",
-                "/api/config",
-                body.clone(),
-                &headers,
-                "127.0.0.1:12345",
-            )
-            .await;
-            assert_error(status, &response, StatusCode::FORBIDDEN);
-        }
-        // Construct this request directly so there is only one hostile Host header.
-        for host in ["evil.example:6980", "127.0.0.1:6981", "192.0.2.1:6980", ""] {
-            let mut request = Request::builder()
-                .uri("/api/state")
-                .header(header::HOST, host)
-                .body(Body::empty())
-                .unwrap();
-            request.extensions_mut().insert(ConnectInfo(
-                "127.0.0.1:12345".parse::<SocketAddr>().unwrap(),
-            ));
-            let response = app(f.web()).oneshot(request).await.unwrap();
-            assert_eq!(response.status(), StatusCode::FORBIDDEN, "Host {host}");
-            let value: Value =
-                serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap())
-                    .unwrap();
-            assert!(value["error"].is_string());
-        }
-        let (status, response) = call(
+        let settings = serde_json::to_value(f.settings()).unwrap();
+        let (status, body) = call(
             f.web(),
             "PUT",
             "/api/config",
-            body,
-            &[
-                ("origin", "http://127.0.0.1:6980"),
-                ("x-boncas-request", "1"),
-            ],
-            "127.0.0.1:12345",
+            settings,
+            &[("host", "other.example"), ("origin", "null")],
+            "192.0.2.2:12345",
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let (status, body) = call(
+            f.web(),
+            "POST",
+            "/api/refresh",
+            Value::Null,
+            &[
+                ("host", "anything.invalid"),
+                ("origin", "https://cross-site.example"),
+            ],
+            "192.0.2.2:12345",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
     });
 }
 
@@ -479,86 +408,19 @@ fn same_port_address_change_restores_released_socket_on_bind_failure() {
 }
 
 #[test]
-fn nonloopback_token_bootstrap_persists_and_reuses_random_secret() {
+fn legacy_ini_token_is_ignored_and_not_saved() {
     let f = Fixture::new();
-    f.control.config.write().web_listen = "0.0.0.0:6980".parse().unwrap();
-    ensure_token(&f.control).unwrap();
-    let token = f.control.config.read().web_token.clone();
-    assert_eq!(token.len(), 64);
-    assert!(token.bytes().all(|b| b.is_ascii_hexdigit()));
+    std::fs::write(
+        &f.control.path,
+        "[Web]\nListen=0.0.0.0:6980\nEnabled=true\nToken=legacy-secret\n",
+    )
+    .unwrap();
     let mut loaded = Config::default();
     loaded.load_file(&f.control.path).unwrap();
-    assert_eq!(loaded.web_token, token);
-    let saved = std::fs::read(&f.control.path).unwrap();
-    ensure_token(&f.control).unwrap();
-    assert_eq!(f.control.config.read().web_token, token);
-    assert_eq!(std::fs::read(&f.control.path).unwrap(), saved);
-    // Simulate another process starting without an in-memory token.
-    f.control.config.write().web_token.clear();
-    ensure_token(&f.control).unwrap();
-    assert_eq!(f.control.config.read().web_token, token);
-    assert_eq!(std::fs::read(&f.control.path).unwrap(), saved);
-}
-
-#[test]
-fn token_bootstrap_does_not_persist_effective_cli_overrides() {
-    let f = Fixture::new();
-    let original = Config::default();
-    original.save(&f.control.path).unwrap();
-    {
-        let mut effective = f.control.config.write();
-        effective.port = 54321;
-        effective.address = "127.0.0.2".parse().unwrap();
-        effective.pins = ["temporary B-CAS".into(), "temporary ACAS".into()];
-        effective.verbose = true;
-        effective.allow = vec![boncasrelay_core::config::cidr("192.0.2.0/24").unwrap()];
-        effective.web_listen = "0.0.0.0:16980".parse().unwrap();
-        effective.cli_overrides = vec!["--port".into(), "--listen".into(), "--web-listen".into()];
-    }
-    let effective_settings = serde_json::to_value(f.settings()).unwrap();
-    ensure_token(&f.control).unwrap();
-    let mut loaded = Config::default();
-    loaded.load_file(&f.control.path).unwrap();
-    assert_eq!(
-        serde_json::to_value(Settings::from(&loaded)).unwrap(),
-        serde_json::to_value(Settings::from(&original)).unwrap()
-    );
-    assert_eq!(loaded.web_listen, original.web_listen);
-    assert_eq!(loaded.no_web, original.no_web);
-    assert_eq!(loaded.web_token, f.control.config.read().web_token);
-    assert_eq!(loaded.web_token.len(), 64);
-    assert_eq!(
-        serde_json::to_value(f.settings()).unwrap(),
-        effective_settings
-    );
-    assert_eq!(
-        f.control.config.read().web_listen,
-        "0.0.0.0:16980".parse::<SocketAddr>().unwrap()
-    );
-}
-
-#[test]
-fn local_or_disabled_web_skips_token_generation_and_file_writes() {
-    for (address, disabled) in [
-        ("127.0.0.1:6980", false),
-        ("[::1]:6980", false),
-        ("0.0.0.0:6980", true),
-    ] {
-        let f = Fixture::new();
-        {
-            let mut config = f.control.config.write();
-            config.web_listen = address.parse().unwrap();
-            config.no_web = disabled;
-        }
-        ensure_token(&f.control).unwrap();
-        assert!(f.control.config.read().web_token.is_empty());
-        assert!(!f.control.path.exists());
-        // Existing content must also remain byte-for-byte intact.
-        let sentinel = b"deliberately not an INI config";
-        std::fs::write(&f.control.path, sentinel).unwrap();
-        ensure_token(&f.control).unwrap();
-        assert_eq!(std::fs::read(&f.control.path).unwrap(), sentinel);
-    }
+    assert_eq!(loaded.web_listen, "0.0.0.0:6980".parse().unwrap());
+    loaded.save(&f.control.path).unwrap();
+    let saved = std::fs::read_to_string(&f.control.path).unwrap();
+    assert!(!saved.contains("Token"));
 }
 
 #[test]
@@ -570,7 +432,7 @@ fn refresh_api_publishes_snapshot_and_throttles_immediate_repeat() {
             "POST",
             "/api/refresh",
             Value::Null,
-            &[("x-boncas-request", "1")],
+            &[],
             "127.0.0.1:12345",
         )
         .await;
@@ -585,7 +447,7 @@ fn refresh_api_publishes_snapshot_and_throttles_immediate_repeat() {
             "POST",
             "/api/refresh",
             Value::Null,
-            &[("x-boncas-request", "1")],
+            &[],
             "127.0.0.1:12345",
         )
         .await;
@@ -595,7 +457,7 @@ fn refresh_api_publishes_snapshot_and_throttles_immediate_repeat() {
 }
 
 #[test]
-fn wildcard_and_ipv6_numeric_hosts_work_with_authenticated_peer() {
+fn wildcard_and_ipv6_numeric_hosts_work_without_authentication() {
     let f = Fixture::new();
     runtime().block_on(async {
         for (listen, host, peer) in [
@@ -605,11 +467,9 @@ fn wildcard_and_ipv6_numeric_hosts_work_with_authenticated_peer() {
         ] {
             let mut web = f.web();
             web.address = listen.parse().unwrap();
-            web.token = "test-token".into();
             let mut request = Request::builder()
                 .uri("/api/state")
                 .header(header::HOST, host)
-                .header(header::AUTHORIZATION, "Bearer test-token")
                 .body(Body::empty())
                 .unwrap();
             request
